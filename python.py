@@ -1,5 +1,3 @@
-# python.py
-
 import streamlit as st
 import pandas as pd
 from google import genai
@@ -71,7 +69,7 @@ def get_ai_analysis(data_for_ai, api_key):
 # ------------------- [Giữ nguyên] CHỨC NĂNG 1-5 -------------------
 uploaded_file = st.file_uploader(
     "1. Tải file Excel Báo cáo Tài chính (Chỉ tiêu | Năm trước | Năm sau)",
-type=['xlsx', 'xls']
+    type=['xlsx', 'xls']
 )
 
 if uploaded_file is not None:
@@ -124,6 +122,13 @@ if uploaded_file is not None:
                 thanh_toan_hien_hanh_N_1 = "N/A"
 
             st.subheader("5. Nhận xét Tình hình Tài chính (AI)")
+            
+            # Xử lý để tránh lỗi nếu không tìm thấy chỉ tiêu
+            tsnh_growth = "N/A"
+            tsnh_row = df_processed[df_processed['Chỉ tiêu'].str.contains('TÀI SẢN NGẮN HẠN', case=False, na=False)]
+            if not tsnh_row.empty:
+                tsnh_growth = f"{tsnh_row['Tốc độ tăng trưởng (%)'].iloc[0]:.2f}%"
+            
             data_for_ai = pd.DataFrame({
                 'Chỉ tiêu': [
                     'Toàn bộ Bảng phân tích (dữ liệu thô)', 
@@ -133,7 +138,7 @@ if uploaded_file is not None:
                 ],
                 'Giá trị': [
                     df_processed.to_markdown(index=False),
-f"{df_processed[df_processed['Chỉ tiêu'].str.contains('TÀI SẢN NGẮN HẠN', case=False, na=False)]['Tốc độ tăng trưởng (%)'].iloc[0]:.2f}%", 
+                    tsnh_growth, 
                     f"{thanh_toan_hien_hanh_N_1}", 
                     f"{thanh_toan_hien_hanh_N}"
                 ]
@@ -170,17 +175,19 @@ with st.expander("⚙️ Tuỳ chọn nâng cao", expanded=False):
         "Chọn model Gemini",
         options=[
             "gemini-2.5-flash",
-            "gemini-2.0-pro-exp",
-            "gemini-2.0-flash-thinking-exp"
+            "gemini-2.0-pro-exp", # Giữ các tùy chọn này để người dùng có thể thử các model khác
+            "gemini-2.0-flash-thinking-exp" 
         ],
-        index=0
+        index=0,
+        key="chat_model_select"
     )
     system_instruction = st.text_area(
         "System instruction (ngữ cảnh vai trò/trợ lý)",
         value=(
             "Bạn là trợ lý AI chuyên nghiệp về tài chính – kế toán – kiểm toán. "
             "Trả lời ngắn gọn, có cấu trúc, kèm công thức/mẹo nếu cần."
-        )
+        ),
+        key="chat_system_instruction"
     )
 
 # Lưu lịch sử hội thoại
@@ -190,6 +197,7 @@ if "chat_messages" not in st.session_state:
     ]
 
 def _streamlit_render_messages():
+    """Hiển thị lịch sử chat trong giao diện Streamlit."""
     for msg in st.session_state.chat_messages:
         with st.chat_message("assistant" if msg["role"] == "assistant" else "user"):
             st.markdown(msg["content"])
@@ -197,25 +205,31 @@ def _streamlit_render_messages():
 def _to_gemini_history(messages, system_instruction_text):
     """
     Chuyển lịch sử hội thoại của Streamlit sang định dạng contents cho Google GenAI.
-    Map role:
-      - 'user'     -> role='user'
-      - 'assistant'-> role='model'
-    Thêm phần system_instruction ở đầu nếu có.
+    Thêm system_instruction dưới dạng một tin nhắn user đặc biệt ở đầu để cung cấp ngữ cảnh.
     """
     contents = []
-if system_instruction_text and system_instruction_text.strip():
-        contents.append({"role": "user", "parts": f"[System Instruction]\n{system_instruction_text.strip()}"})
+    # Thêm System Instruction dưới dạng tin nhắn đầu tiên của user (vai trò của mô hình)
+    if system_instruction_text and system_instruction_text.strip():
+        contents.append({"role": "user", "parts": [{"text": f"[System Instruction]\n{system_instruction_text.strip()}"}]})
+    
+    # Thêm lịch sử tin nhắn thực tế
     for m in messages:
         role = "user" if m["role"] == "user" else "model"
-        contents.append({"role": role, "parts": m["content"]})
+        # Bỏ qua tin nhắn chào mừng ban đầu của assistant khi chuyển đổi
+        if m["role"] == "assistant" and m["content"].startswith("Xin chào!"):
+            continue
+            
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+        
     return contents
 
 # Render lịch sử
 _streamlit_render_messages()
 
-# Ô chat
+# Ô chat input
 user_input = st.chat_input("Nhập câu hỏi cho Gemini…")
 if user_input:
+    # 1. Thêm tin nhắn người dùng vào lịch sử và hiển thị
     st.session_state.chat_messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -223,29 +237,34 @@ if user_input:
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         with st.chat_message("assistant"):
-            st.error("Chưa cấu hình GEMINI_API_KEY trong st.secrets. Vào Settings → Secrets để thêm.")
+            st.error("Chưa cấu hình GEMINI_API_KEY trong st.secrets. Vui lòng kiểm tra lại.")
     else:
         try:
             client = genai.Client(api_key=api_key)
+            # Chuyển đổi lịch sử chat
             contents = _to_gemini_history(st.session_state.chat_messages, system_instruction)
-
+            
+            # 2. Gọi API và hiển thị phản hồi
             with st.chat_message("assistant"):
                 with st.spinner("Gemini đang soạn trả lời…"):
                     resp = client.models.generate_content(
                         model=model_name,
                         contents=contents
                     )
+                    # Lấy nội dung hoặc thông báo lỗi nếu có
                     answer = getattr(resp, "text", None) or "Không nhận được nội dung từ mô hình."
                     st.markdown(answer)
-                    # Lưu vào lịch sử
+                    # 3. Lưu phản hồi của AI vào lịch sử
                     st.session_state.chat_messages.append({"role": "assistant", "content": answer})
 
         except APIError as e:
             with st.chat_message("assistant"):
-                st.error(f"Lỗi gọi Gemini API: {e}")
+                st.error(f"Lỗi gọi Gemini API: {e}. Vui lòng kiểm tra Khóa API.")
         except Exception as e:
             with st.chat_message("assistant"):
                 st.error(f"Đã xảy ra lỗi không xác định: {e}")
+        # Buộc rerun để cập nhật khung chat ngay lập tức
+        st.rerun()
 
 # Nút xoá lịch sử chat
 col_reset, _ = st.columns([1, 5])
